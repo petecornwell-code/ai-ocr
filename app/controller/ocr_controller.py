@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
@@ -86,15 +87,30 @@ async def upload_file(
 
 
 @router.post("/jobs/{job_id}/process", response_model=OCRJobResponse)
-def process_job(job_id: int, db: Session = Depends(get_db)):
+async def process_job(job_id: int, db: Session = Depends(get_db)):
     job = get_job(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if job.status != JobStatus.PENDING:
         raise HTTPException(status_code=400, detail=f"Job is already {job.status.value}")
 
-    result = process_ocr_job(db, job_id)
-    return _job_to_response(result)
+    # Run the blocking OCR + crew work in a separate thread so the event
+    # loop stays free for other requests.  process_ocr_job manages its own
+    # DB session internally, so the request-scoped session is not shared.
+    result_dict = await asyncio.to_thread(process_ocr_job, job_id)
+
+    # Deserialize the JSON string fields for the response.
+    result_dict["extraction_schema"] = (
+        json.loads(result_dict["extraction_schema"])
+        if result_dict["extraction_schema"]
+        else None
+    )
+    result_dict["crew_analysis"] = (
+        json.loads(result_dict["crew_analysis"])
+        if result_dict["crew_analysis"]
+        else None
+    )
+    return result_dict
 
 
 @router.get("/jobs", response_model=OCRJobListResponse)

@@ -45,36 +45,64 @@ def create_job(
     return job
 
 
-def process_ocr_job(db: Session, job_id: int) -> OCRJob:
-    job = db.query(OCRJob).filter(OCRJob.id == job_id).first()
-    if not job:
-        raise ValueError(f"Job {job_id} not found")
+def process_ocr_job(job_id: int) -> dict:
+    """Run OCR and crew analysis in a thread-safe way with its own DB session.
 
-    job.status = JobStatus.PROCESSING
-    db.commit()
+    This function is designed to be called via ``asyncio.to_thread`` so it
+    does not block the event loop.  It opens and closes its own database
+    session rather than sharing one across threads.
 
+    Returns a response-ready dict (not an ORM object) so the caller does
+    not need to touch the session.
+    """
+    from app.database import SessionLocal
+
+    db = SessionLocal()
     try:
-        extracted_text = perform_ocr(job.file_path)
-        job.extracted_text = extracted_text
+        job = db.query(OCRJob).filter(OCRJob.id == job_id).first()
+        if not job:
+            raise ValueError(f"Job {job_id} not found")
 
-        extraction_schema = (
-            json.loads(job.extraction_schema) if job.extraction_schema else None
-        )
+        job.status = JobStatus.PROCESSING
+        db.commit()
 
-        if extraction_schema:
-            crew_result = run_ocr_analysis(extracted_text, extraction_schema)
-            job.crew_analysis = json.dumps(crew_result)
-        else:
-            job.crew_analysis = None
+        try:
+            extracted_text = perform_ocr(job.file_path)
+            job.extracted_text = extracted_text
 
-        job.status = JobStatus.COMPLETED
-    except Exception as e:
-        job.status = JobStatus.FAILED
-        job.error_message = str(e)
+            extraction_schema = (
+                json.loads(job.extraction_schema) if job.extraction_schema else None
+            )
 
-    db.commit()
-    db.refresh(job)
-    return job
+            if extraction_schema:
+                crew_result = run_ocr_analysis(extracted_text, extraction_schema)
+                job.crew_analysis = json.dumps(crew_result)
+            else:
+                job.crew_analysis = None
+
+            job.status = JobStatus.COMPLETED
+        except Exception as e:
+            job.status = JobStatus.FAILED
+            job.error_message = str(e)
+
+        db.commit()
+        db.refresh(job)
+
+        # Snapshot all attributes while the session is still open so the
+        # caller can build a response without touching the ORM object.
+        return {
+            "id": job.id,
+            "filename": job.filename,
+            "status": job.status.value if hasattr(job.status, "value") else job.status,
+            "extraction_schema": job.extraction_schema,
+            "extracted_text": job.extracted_text,
+            "crew_analysis": job.crew_analysis,
+            "error_message": job.error_message,
+            "created_at": job.created_at,
+            "updated_at": job.updated_at,
+        }
+    finally:
+        db.close()
 
 
 def get_job(db: Session, job_id: int) -> OCRJob | None:

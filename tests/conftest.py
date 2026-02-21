@@ -1,12 +1,14 @@
 import os
 import shutil
 import tempfile
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import StaticPool, create_engine
 from sqlalchemy.orm import sessionmaker
 
+import app.database as _db_module
 from app.database import Base, get_db
 from app.main import app
 
@@ -44,8 +46,13 @@ def client(setup_db):
             session.close()
 
     app.dependency_overrides[get_db] = override_get_db
-    with TestClient(app) as c:
-        yield c
+
+    # Also patch SessionLocal so that process_ocr_job (which opens its
+    # own session in a background thread) uses the same test database.
+    with patch.object(_db_module, "SessionLocal", TestingSessionLocal):
+        with TestClient(app) as c:
+            yield c
+
     app.dependency_overrides.clear()
 
 
