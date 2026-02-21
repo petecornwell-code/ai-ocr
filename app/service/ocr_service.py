@@ -1,5 +1,6 @@
 import json
 import os
+import uuid
 
 import pytesseract
 from PIL import Image
@@ -13,7 +14,8 @@ from app.service.crew_service import run_ocr_analysis
 
 def save_upload_file(file_content: bytes, filename: str) -> str:
     os.makedirs(settings.upload_dir, exist_ok=True)
-    file_path = os.path.join(settings.upload_dir, filename)
+    unique_name = f"{uuid.uuid4().hex}_{filename}"
+    file_path = os.path.join(settings.upload_dir, unique_name)
     with open(file_path, "wb") as f:
         f.write(file_content)
     return file_path

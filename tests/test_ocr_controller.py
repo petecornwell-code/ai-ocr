@@ -101,6 +101,35 @@ class TestUpload:
             )
             assert response.status_code == 201, f"Failed for extension: {ext}"
 
+    @patch("app.service.ocr_service.perform_ocr", return_value="text")
+    def test_duplicate_filenames_do_not_overwrite(self, mock_ocr, client):
+        png_bytes = _make_png_bytes()
+        resp1 = client.post(
+            "/ocr/upload",
+            files={"file": ("same.png", png_bytes, "image/png")},
+        )
+        resp2 = client.post(
+            "/ocr/upload",
+            files={"file": ("same.png", png_bytes, "image/png")},
+        )
+        assert resp1.status_code == 201
+        assert resp2.status_code == 201
+
+        # Both store the original filename
+        assert resp1.json()["filename"] == "same.png"
+        assert resp2.json()["filename"] == "same.png"
+
+        # But they are separate jobs with separate IDs
+        assert resp1.json()["id"] != resp2.json()["id"]
+
+        # Process both — if files overwrote each other, one would fail
+        client.post(f"/ocr/jobs/{resp1.json()['id']}/process")
+        client.post(f"/ocr/jobs/{resp2.json()['id']}/process")
+        job1 = client.get(f"/ocr/jobs/{resp1.json()['id']}").json()
+        job2 = client.get(f"/ocr/jobs/{resp2.json()['id']}").json()
+        assert job1["status"] == "completed"
+        assert job2["status"] == "completed"
+
 
 class TestListJobs:
     def test_list_jobs_empty(self, client):
