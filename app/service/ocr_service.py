@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytesseract
@@ -24,11 +25,17 @@ def perform_ocr(file_path: str) -> str:
     return text.strip()
 
 
-def create_job(db: Session, filename: str, file_path: str) -> OCRJob:
+def create_job(
+    db: Session,
+    filename: str,
+    file_path: str,
+    extraction_schema: dict | None = None,
+) -> OCRJob:
     job = OCRJob(
         filename=filename,
         file_path=file_path,
         status=JobStatus.PENDING,
+        extraction_schema=json.dumps(extraction_schema) if extraction_schema else None,
     )
     db.add(job)
     db.commit()
@@ -48,8 +55,15 @@ def process_ocr_job(db: Session, job_id: int) -> OCRJob:
         extracted_text = perform_ocr(job.file_path)
         job.extracted_text = extracted_text
 
-        crew_result = run_ocr_analysis(extracted_text)
-        job.crew_analysis = crew_result
+        extraction_schema = (
+            json.loads(job.extraction_schema) if job.extraction_schema else None
+        )
+
+        if extraction_schema:
+            crew_result = run_ocr_analysis(extracted_text, extraction_schema)
+            job.crew_analysis = json.dumps(crew_result)
+        else:
+            job.crew_analysis = None
 
         job.status = JobStatus.COMPLETED
     except Exception as e:

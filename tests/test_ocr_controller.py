@@ -1,4 +1,5 @@
 import io
+import json
 from unittest.mock import patch
 
 from PIL import Image
@@ -13,6 +14,34 @@ def _make_png_bytes():
     return buf.read()
 
 
+SAMPLE_SCHEMA = {
+    "fields": {
+        "invoice_number": {"type": "string", "description": "Invoice number"},
+        "total_amount": {"type": "string", "description": "Total amount due"},
+    }
+}
+
+SAMPLE_CREW_RESULT = {
+    "fields": {
+        "invoice_number": {
+            "value": "INV-001",
+            "status": "consensus",
+            "votes": {"agent_a": "INV-001", "agent_b": "INV-001", "agent_c": "INV-0O1"},
+        },
+        "total_amount": {
+            "value": "$500.00",
+            "status": "consensus",
+            "votes": {"agent_a": "$500.00", "agent_b": "$500.00", "agent_c": "$500.00"},
+        },
+    },
+    "summary": {
+        "total_fields": 2,
+        "consensus_count": 2,
+        "intervention_count": 0,
+    },
+}
+
+
 class TestUpload:
     def test_upload_valid_image(self, client):
         png_bytes = _make_png_bytes()
@@ -25,6 +54,28 @@ class TestUpload:
         assert data["filename"] == "test.png"
         assert data["status"] == "pending"
         assert data["id"] is not None
+        assert data["extraction_schema"] is None
+
+    def test_upload_with_extraction_schema(self, client):
+        png_bytes = _make_png_bytes()
+        response = client.post(
+            "/ocr/upload",
+            files={"file": ("test.png", png_bytes, "image/png")},
+            data={"extraction_schema": json.dumps(SAMPLE_SCHEMA)},
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["extraction_schema"] == SAMPLE_SCHEMA
+
+    def test_upload_with_invalid_schema(self, client):
+        png_bytes = _make_png_bytes()
+        response = client.post(
+            "/ocr/upload",
+            files={"file": ("test.png", png_bytes, "image/png")},
+            data={"extraction_schema": "not valid json"},
+        )
+        assert response.status_code == 400
+        assert "Invalid extraction_schema" in response.json()["detail"]
 
     def test_upload_invalid_extension(self, client):
         response = client.post(
@@ -129,8 +180,26 @@ class TestGetJob:
 
 class TestProcessJob:
     @patch("app.service.ocr_service.perform_ocr", return_value="Extracted OCR text")
-    @patch("app.service.ocr_service.run_ocr_analysis", return_value="Crew analysis result")
-    def test_process_job_success(self, mock_crew, mock_ocr, client):
+    @patch("app.service.ocr_service.run_ocr_analysis", return_value=SAMPLE_CREW_RESULT)
+    def test_process_job_with_schema(self, mock_crew, mock_ocr, client):
+        png_bytes = _make_png_bytes()
+        upload_resp = client.post(
+            "/ocr/upload",
+            files={"file": ("test.png", png_bytes, "image/png")},
+            data={"extraction_schema": json.dumps(SAMPLE_SCHEMA)},
+        )
+        job_id = upload_resp.json()["id"]
+
+        response = client.post(f"/ocr/jobs/{job_id}/process")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "completed"
+        assert data["extracted_text"] == "Extracted OCR text"
+        assert data["crew_analysis"]["summary"]["consensus_count"] == 2
+        assert data["crew_analysis"]["fields"]["invoice_number"]["status"] == "consensus"
+
+    @patch("app.service.ocr_service.perform_ocr", return_value="Extracted OCR text")
+    def test_process_job_without_schema(self, mock_ocr, client):
         png_bytes = _make_png_bytes()
         upload_resp = client.post(
             "/ocr/upload",
@@ -143,7 +212,7 @@ class TestProcessJob:
         data = response.json()
         assert data["status"] == "completed"
         assert data["extracted_text"] == "Extracted OCR text"
-        assert data["crew_analysis"] == "Crew analysis result"
+        assert data["crew_analysis"] is None
 
     @patch("app.service.ocr_service.perform_ocr", side_effect=Exception("OCR failed"))
     def test_process_job_failure(self, mock_ocr, client):
@@ -165,8 +234,7 @@ class TestProcessJob:
         assert response.status_code == 404
 
     @patch("app.service.ocr_service.perform_ocr", return_value="text")
-    @patch("app.service.ocr_service.run_ocr_analysis", return_value="analysis")
-    def test_process_job_already_processed(self, mock_crew, mock_ocr, client):
+    def test_process_job_already_processed(self, mock_ocr, client):
         png_bytes = _make_png_bytes()
         upload_resp = client.post(
             "/ocr/upload",
