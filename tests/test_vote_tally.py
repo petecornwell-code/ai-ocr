@@ -1,4 +1,6 @@
-from app.service.crew_service import tally_votes
+from unittest.mock import MagicMock
+
+from app.service.crew_service import _parse_task_output, tally_votes
 
 
 class TestTallyVotesUnanimous:
@@ -142,3 +144,44 @@ class TestTallyVotesEdgeCases:
         assert result["summary"]["total_fields"] == 10
         assert result["summary"]["consensus_count"] == 10
         assert result["summary"]["intervention_count"] == 0
+
+
+class TestParseTaskOutput:
+    def _make_task(self, output_str):
+        task = MagicMock()
+        task.output = output_str
+        return task
+
+    def test_valid_json(self):
+        task = self._make_task('{"name": "John", "amount": "$100"}')
+        result = _parse_task_output(task, ["name", "amount"])
+        assert result == {"name": "John", "amount": "$100"}
+
+    def test_json_embedded_in_text(self):
+        task = self._make_task(
+            'Here is the result:\n{"name": "John", "amount": "$100"}\nDone.'
+        )
+        result = _parse_task_output(task, ["name", "amount"])
+        assert result == {"name": "John", "amount": "$100"}
+
+    def test_unparseable_returns_nulls(self):
+        task = self._make_task("This is not JSON at all")
+        result = _parse_task_output(task, ["name", "amount"])
+        assert result == {"name": None, "amount": None}
+
+    def test_empty_output_returns_nulls(self):
+        task = self._make_task("")
+        result = _parse_task_output(task, ["name"])
+        assert result == {"name": None}
+
+    def test_none_output_returns_nulls(self):
+        task = MagicMock()
+        task.output = None
+        result = _parse_task_output(task, ["name"])
+        assert result == {"name": None}
+
+    def test_json_with_extra_keys_preserved(self):
+        task = self._make_task('{"name": "John", "extra": "ignored"}')
+        result = _parse_task_output(task, ["name"])
+        assert result["name"] == "John"
+        assert result["extra"] == "ignored"

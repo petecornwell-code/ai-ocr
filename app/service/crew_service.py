@@ -1,18 +1,25 @@
 import json
+import logging
 from collections import Counter
+
+logger = logging.getLogger(__name__)
+
+AGENT_NAMES = ("agent_a", "agent_b", "agent_c")
 
 
 def run_ocr_analysis(
     extracted_text: str,
     extraction_schema: dict,
 ) -> dict:
-    """Run a 3-agent voting crew to extract and validate fields from OCR text.
+    """Run a 3-agent crew to extract fields, then tally votes deterministically.
 
     Each of the three OCR extraction agents uses a different LLM and
     independently extracts the fields defined in ``extraction_schema``.
-    The vote coordinator then compares results field-by-field:
-      - 2/3 or 3/3 agreement  → consensus value (success)
-      - all three disagree     → field flagged for intervention
+    Their raw outputs are parsed into dicts, then fed to ``tally_votes``
+    which compares results field-by-field:
+
+      - 2/3 or 3/3 agreement  -> consensus value (success)
+      - all three disagree     -> field flagged for intervention
 
     Returns a dict of the form::
 
@@ -37,50 +44,6 @@ def run_ocr_analysis(
     field_names = list(extraction_schema.get("fields", {}).keys())
     fields_description = json.dumps(extraction_schema["fields"], indent=2)
 
-    # ── Three OCR-extraction agents, each on a different LLM ───────────
-    agent_a = Agent(
-        role="OCR Extraction Agent A",
-        goal=(
-            "Extract structured field values from raw OCR text. "
-            "Return ONLY valid JSON with the requested field names as keys."
-        ),
-        backstory=(
-            "You are a meticulous data-entry specialist who reads raw OCR "
-            "output and extracts exact field values without hallucinating."
-        ),
-        llm="model_a",
-        verbose=False,
-    )
-
-    agent_b = Agent(
-        role="OCR Extraction Agent B",
-        goal=(
-            "Extract structured field values from raw OCR text. "
-            "Return ONLY valid JSON with the requested field names as keys."
-        ),
-        backstory=(
-            "You are a detail-oriented document processor who carefully "
-            "identifies and extracts field values from noisy OCR text."
-        ),
-        llm="model_b",
-        verbose=False,
-    )
-
-    agent_c = Agent(
-        role="OCR Extraction Agent C",
-        goal=(
-            "Extract structured field values from raw OCR text. "
-            "Return ONLY valid JSON with the requested field names as keys."
-        ),
-        backstory=(
-            "You are an experienced forms analyst who can reliably parse "
-            "OCR output and return accurate field values."
-        ),
-        llm="model_c",
-        verbose=False,
-    )
-
-    # ── Extraction tasks (one per agent) ───────────────────────────────
     task_prompt = (
         "Extract the following fields from the OCR text below.\n\n"
         f"Fields to extract:\n{fields_description}\n\n"
@@ -94,77 +57,88 @@ def run_ocr_analysis(
         + ". Each value is the extracted text or null."
     )
 
-    task_a = Task(
-        description=task_prompt,
-        expected_output=expected,
-        agent=agent_a,
-    )
-    task_b = Task(
-        description=task_prompt,
-        expected_output=expected,
-        agent=agent_b,
-    )
-    task_c = Task(
-        description=task_prompt,
-        expected_output=expected,
-        agent=agent_c,
-    )
+    agents_config = [
+        {
+            "role": "OCR Extraction Agent A",
+            "backstory": (
+                "You are a meticulous data-entry specialist who reads raw OCR "
+                "output and extracts exact field values without hallucinating."
+            ),
+            "llm": "model_a",
+        },
+        {
+            "role": "OCR Extraction Agent B",
+            "backstory": (
+                "You are a detail-oriented document processor who carefully "
+                "identifies and extracts field values from noisy OCR text."
+            ),
+            "llm": "model_b",
+        },
+        {
+            "role": "OCR Extraction Agent C",
+            "backstory": (
+                "You are an experienced forms analyst who can reliably parse "
+                "OCR output and return accurate field values."
+            ),
+            "llm": "model_c",
+        },
+    ]
 
-    # ── Vote coordinator agent ─────────────────────────────────────────
-    coordinator = Agent(
-        role="Vote Coordinator",
-        goal=(
-            "Compare the three extraction results field-by-field. "
-            "For each field, determine if at least two agents agree. "
-            "Return a JSON report."
-        ),
-        backstory=(
-            "You are a quality-assurance coordinator responsible for "
-            "reconciling outputs from multiple OCR extraction agents. "
-            "You tally votes per field and flag disagreements."
-        ),
-        verbose=False,
-    )
+    agents = []
+    tasks = []
+    for cfg in agents_config:
+        agent = Agent(
+            role=cfg["role"],
+            goal=(
+                "Extract structured field values from raw OCR text. "
+                "Return ONLY valid JSON with the requested field names as keys."
+            ),
+            backstory=cfg["backstory"],
+            llm=cfg["llm"],
+            verbose=False,
+        )
+        task = Task(
+            description=task_prompt,
+            expected_output=expected,
+            agent=agent,
+        )
+        agents.append(agent)
+        tasks.append(task)
 
-    coordination_task = Task(
-        description=(
-            "You will receive extraction results from three agents as context. "
-            "For each field, compare the three values:\n"
-            "- If 2 or 3 agents agree, mark the field as 'consensus' with the "
-            "  agreed-upon value.\n"
-            "- If all 3 values are different, mark the field as "
-            "  'intervention_required' with a null value.\n\n"
-            "Return a JSON object with the structure:\n"
-            '{"fields": {"<name>": {"value": ..., "status": "consensus"|'
-            '"intervention_required", "votes": {"agent_a": ..., "agent_b": '
-            '..., "agent_c": ...}}}, "summary": {"total_fields": N, '
-            '"consensus_count": N, "intervention_count": N}}'
-        ),
-        expected_output=(
-            "A JSON object with 'fields' and 'summary' keys following the "
-            "schema described above."
-        ),
-        agent=coordinator,
-        context=[task_a, task_b, task_c],
-    )
+    crew = Crew(agents=agents, tasks=tasks, verbose=False)
+    crew.kickoff()
 
-    # ── Assemble and run the crew ──────────────────────────────────────
-    crew = Crew(
-        agents=[agent_a, agent_b, agent_c, coordinator],
-        tasks=[task_a, task_b, task_c, coordination_task],
-        verbose=False,
-    )
+    # ── Parse each agent's output and tally deterministically ──────────
+    agent_results = {}
+    for name, task in zip(AGENT_NAMES, tasks):
+        agent_results[name] = _parse_task_output(task, field_names)
 
-    result = crew.kickoff()
+    return tally_votes(agent_results, field_names)
 
-    # Try to parse a structured result; fall back to the raw string.
+
+def _parse_task_output(task, field_names: list[str]) -> dict[str, str | None]:
+    """Extract a dict from a CrewAI task's output, with fallback to empty."""
+    raw = str(task.output) if task.output else ""
     try:
-        return json.loads(str(result))
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
     except json.JSONDecodeError:
-        return _build_result_from_raw(str(result), field_names)
+        # Try to find a JSON object embedded in the output text
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end > start:
+            try:
+                parsed = json.loads(raw[start : end + 1])
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+    logger.warning("Failed to parse agent output as JSON: %.200s", raw)
+    return {f: None for f in field_names}
 
 
-# ── Deterministic vote tallying (used by tests and as fallback) ────────
+# ── Deterministic vote tallying ────────────────────────────────────────
 
 
 def tally_votes(
@@ -216,25 +190,5 @@ def tally_votes(
             "total_fields": len(field_names),
             "consensus_count": consensus_count,
             "intervention_count": intervention_count,
-        },
-    }
-
-
-def _build_result_from_raw(raw: str, field_names: list[str]) -> dict:
-    """Last-resort wrapper when the crew output isn't valid JSON."""
-    fields = {}
-    for f in field_names:
-        fields[f] = {
-            "value": None,
-            "status": "intervention_required",
-            "votes": {"agent_a": None, "agent_b": None, "agent_c": None},
-        }
-    return {
-        "raw_output": raw,
-        "fields": fields,
-        "summary": {
-            "total_fields": len(field_names),
-            "consensus_count": 0,
-            "intervention_count": len(field_names),
         },
     }
